@@ -1,0 +1,166 @@
+---
+title: "O-MAP Targeting Quant and comparison"
+author: "AndrewDominguez"
+date: "2023-06-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/andrewd/Desktop/Analysis_Workspace/07132023/")
+getwd()
+```
+
+```{r load packages}
+library(tidyverse)
+library(readxl)
+library(ggpubr)
+library(gridExtra)
+library(grid)
+library(patchwork)
+library(gt)
+library(gtExtras)
+library(cowplot)
+library(webshot2)
+library(magick)
+```
+
+
+```{r}
+wd <- getwd()
+dataImport <- list.files(path =  wd, pattern = "*.xlsx") %>%
+  map_df(~read_excel(.x))
+
+
+
+dataReformat <- dataImport[43:nrow(dataImport), 3:ncol(dataImport)]
+dataReformat <- subset(dataReformat, dataReformat$...15 == "Blank 562") 
+dataReformat <- dataReformat[ ,1:12]
+colnames(dataReformat) <- c('1','2','3','4','5','6','7','8','9','10','11','12')
+rownames(dataReformat) <- c('A','B','C','D','E','F','G','H')
+view(dataReformat)
+```
+
+```{r}
+SampleParse <- function(data, rowStart, rowEnd, ColStart, Colend, SampleName){
+  Samplelocation <- data[rowStart: rowEnd, ColStart: Colend]
+  Samplelocation <- mutate_all(Samplelocation, function(x) as.numeric(as.character(x)))
+  Samplelocation$Avg <- rowMeans(Samplelocation)
+  names(Samplelocation)[3] <- SampleName
+  return(Samplelocation)
+}
+
+P.conc <- data.frame(P.conc = c(2000, 1000, 500, 250, 125, 62.5, 31.25, 0))
+
+###Edit the well positions of each sample below####
+BCAstandards <- SampleParse(dataReformat, 1, 8, 1, 2, "Standard") #FirstRow, LastRow, FirstColumn, LastColumn
+
+Sample_1 <- SampleParse(dataReformat, 1, 2, 3, 4, "BMY3424_20Min")
+Sample_2 <- SampleParse(dataReformat, 1, 2, 5, 6, "BMY3424_ITS2")
+Sample_3 <- SampleParse(dataReformat, 1, 2, 7, 8, "BMY3424_Scr")
+
+Sample_4 <- SampleParse(dataReformat, 4, 5, 3, 4, "BMY2175_20min")
+Sample_5 <- SampleParse(dataReformat, 4, 5, 5, 6, "BMY2175_ITS2")
+Sample_6 <- SampleParse(dataReformat, 4, 5, 7, 8, "BMY2175_Scr")
+
+#Sample number
+DilutionNum <- 2
+Selected_DilutionFactor <- 10
+
+##################################################
+
+SampleDFs.list <- Filter(function(x) is(x, "data.frame"), mget(ls()))
+SampleDFs.list <- SampleDFs.list[names(SampleDFs.list) != "dataReformat"]
+SampleDFs.list <- SampleDFs.list[names(SampleDFs.list) != "dataImport"]
+SampleDFs.list <- SampleDFs.list[names(SampleDFs.list) != "P.conc"]
+SampleDFs.list <- SampleDFs.list[names(SampleDFs.list) != "BCAstandards"]
+```
+
+```{r}
+extracted_cols <- lapply(SampleDFs.list, function(x) x[3])
+
+AveragesDF <- do.call("cbind", extracted_cols)
+AveragesDF <- AveragesDF %>% select(order(colnames(AveragesDF)))
+AveragesDF <- cbind( BCAstandards[3], AveragesDF)
+AveragesDF[3:nrow(AveragesDF), DilutionNum:ncol(AveragesDF)] <- NA
+CorrDF <- AveragesDF %>% mutate_all(~(.-AveragesDF$Standard[8]))
+CorrDF <- cbind(P.conc, CorrDF)
+```
+
+```{r}
+
+BCAstandardsCorr <- data.frame(Abs562 = CorrDF$Standard, P.Conc = CorrDF$P.conc)
+
+lm.model <- lm(P.Conc ~ Abs562, data = BCAstandardsCorr)
+summary(lm.model)
+
+
+lm_eqn <- function(df, y, x){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+
+StandardCurvePlot <- ggplot(BCAstandardsCorr, aes(x=P.Conc, y = Abs562)) +
+  stat_smooth(method = 'lm', se = FALSE, color="grey", linetype="dashed") +
+  geom_point(color="black", shape=1) +
+  #stat_regline_equation(label.x.npc = "center") +
+  geom_text(x = 500, y = 1.75, label = lm_eqn(BCAstandardsCorr, BCAstandardsCorr$Abs562, BCAstandardsCorr$P.Conc), parse = TRUE, alpha=0.15) +
+  labs(title = "Protein Concentration of OMAP Samples", x = "Protein concentration (ug/mL)", y = "Absorbance (562nm)") +
+  theme_bw()
+StandardCurvePlot
+
+```
+
+
+
+```{r}
+Dil_10X <- CorrDF[1, 3:ncol(CorrDF)]
+ExpData <- data.frame(t(Dil_10X))
+colnames(ExpData) <- c("Abs562")
+ExpData$P.Conc <- predict(lm.model, ExpData)
+ExpData$Sample <- rownames(ExpData)
+ExpPlotted <- StandardCurvePlot + geom_point(data = ExpData, aes(color=Sample), size = 3)
+ExpPlotted
+ExpData$Calc.P.Conc <- ExpData$P.Conc*Selected_DilutionFactor
+ExpData <- ExpData[, c("Sample", "Abs562", "P.Conc", "Calc.P.Conc")]
+
+ExpData$`Retention %`[1] <- ExpData$Calc.P.Conc[1]/ExpData$Calc.P.Conc[1]*100
+ExpData$`Retention %`[2] <- ExpData$Calc.P.Conc[2]/ExpData$Calc.P.Conc[1]*100
+ExpData$`Retention %`[3] <- ExpData$Calc.P.Conc[3]/ExpData$Calc.P.Conc[1]*100
+ExpData$`Retention %`[4] <- ExpData$Calc.P.Conc[4]/ExpData$Calc.P.Conc[4]*100
+ExpData$`Retention %`[5] <- ExpData$Calc.P.Conc[5]/ExpData$Calc.P.Conc[4]*100
+ExpData$`Retention %`[6] <- ExpData$Calc.P.Conc[6]/ExpData$Calc.P.Conc[4]*100
+ExpData$`Retention scaled` <- ExpData$`Retention %`
+
+
+
+
+```
+
+
+```{r}
+
+myTable <- ExpData %>%
+  gt() %>%
+  gt_plt_bar_pct(column = `Retention scaled` , scaled = TRUE, fill = "dodgerblue", background = "lightblue") %>%
+  cols_align("center", contains("scale")) %>%
+  cols_width(4 ~ px(125), 5 ~ px(125)) %>%
+  gtsave("ExpData.png", path = wd)
+  
+myStandards <- BCAstandardsCorr %>%
+  gt() %>% 
+  gt_theme_espn() %>%
+  gtsave("Standards.png", path = wd)
+
+myTable <- ggdraw() + draw_image("ExpData.png", scale = 1.5)
+myStandards <- ggdraw() + draw_image("Standards.png", scale = 0.8)
+
+ExpPlotted / (myStandards | myTable)
+
+ggsave("StdCurvePlots.svg", plot = last_plot(), units = "in", height = 8, width = 10, dpi = 300)
+```
